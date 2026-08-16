@@ -273,7 +273,7 @@ RULES:
   },
 ];
 
-// ── STORAGE ───────────────────────────────────────────────────────────────
+// ── STORAGE (browser localStorage — persists per-browser on the deployed site) ──
 const storage = {
   async get(key) {
     try {
@@ -332,7 +332,7 @@ export default function CaseOS() {
   const [screen, setScreen] = useState("splash");
   const [authMode, setAuthMode] = useState("login");
   const [user, setUser] = useState(null);
-  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "" });
+  const [authForm, setAuthForm] = useState({ name: "", email: "", password: "", role: "student", companyName: "", industry: "", college: "" });
   const [authError, setAuthError] = useState("");
   const [authLoading, setAuthLoading] = useState(false);
   const [selectedCase, setSelectedCase] = useState(null);
@@ -348,27 +348,55 @@ export default function CaseOS() {
   const [newCase, setNewCase] = useState({ company: "", problem: "", facts: "", constraint: "", role: "", tags: "" });
   const [creatingCase, setCreatingCase] = useState(false);
   const [customCases, setCustomCases] = useState([]);
+  // ── Business / Admin state ──
+  const [bizProblems, setBizProblems] = useState([]);
+  const [publishedProblems, setPublishedProblems] = useState([]);
+  const [problemChat, setProblemChat] = useState([]);
+  const [problemInput, setProblemInput] = useState("");
+  const [problemChatLoading, setProblemChatLoading] = useState(false);
+  const [problemReadyToFinalize, setProblemReadyToFinalize] = useState(false);
+  const [finalizingProblem, setFinalizingProblem] = useState(false);
+  const [viewingProblem, setViewingProblem] = useState(null);
+  const [problemSubmissions, setProblemSubmissions] = useState([]);
+  const [adminTab, setAdminTab] = useState("overview");
+  const [adminStudents, setAdminStudents] = useState([]);
+  const [adminBusinesses, setAdminBusinesses] = useState([]);
+  const [adminProblems, setAdminProblems] = useState([]);
+  const [adminLoading, setAdminLoading] = useState(false);
   const exchangeCount = useRef(0);
   const chatEndRef = useRef(null);
+  const problemChatEndRef = useRef(null);
   const inputRef = useRef(null);
 
   useEffect(() => { chatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [messages]);
+  useEffect(() => { problemChatEndRef.current?.scrollIntoView({ behavior: "smooth" }); }, [problemChat]);
 
   useEffect(() => {
     const init = async () => {
       try {
-        const dk = "user:demo@caseos.in";
-        const ex = await storage.get(dk);
-        if (!ex?.value) await storage.set(dk, { id: "u_demo_001", name: "Pankaj Demo", email: "demo@caseos.in", password: "caseos123", joinedAt: new Date().toISOString() });
+        for (const [email, seed] of Object.entries(DEMO_SEED_ACCOUNTS)) {
+          const key = `user:${email}`;
+          const ex = await storage.get(key);
+          if (!ex?.value) await storage.set(key, seed);
+        }
       } catch {}
       const saved = sessionStorage.getItem("caseos_user");
-      if (saved) { setUser(JSON.parse(saved)); setScreen("dashboard"); }
+      if (saved) {
+        const u = JSON.parse(saved);
+        setUser(u);
+        setScreen(u.role === "admin" ? "admin" : u.role === "business" ? "bizDashboard" : "dashboard");
+      }
       else setTimeout(() => setScreen("auth"), 1600);
     };
     init();
   }, []);
 
-  useEffect(() => { if (user) loadProgress(); }, [user]);
+  useEffect(() => {
+    if (!user) return;
+    if (user.role === "business") loadBizProblems();
+    else if (user.role === "admin") loadAdminData();
+    else { loadProgress(); loadPublishedProblems(); }
+  }, [user]);
 
   const loadProgress = async () => {
     const result = await storage.list(`progress:${user.id}:`);
@@ -391,26 +419,44 @@ export default function CaseOS() {
     setUserProgress(prev => ({ ...prev, [caseId]: data }));
   };
 
-  const handleAuth = async () => {
+  const DEMO_SEED_ACCOUNTS = {
+    "demo@caseos.in": { id: "u_demo_001", name: "Pankaj Demo", email: "demo@caseos.in", password: "caseos123", role: "student", college: "IIM Bengaluru", joinedAt: new Date().toISOString() },
+    "business@caseos.in": { id: "u_biz_001", name: "Ravi Kaka", email: "business@caseos.in", password: "biz123", role: "business", companyName: "Kaka Cafe", industry: "Food & Beverage", joinedAt: new Date().toISOString() },
+    "admin@caseos.in": { id: "u_admin_001", name: "CaseOS Admin", email: "admin@caseos.in", password: "admin123", role: "admin", joinedAt: new Date().toISOString() },
+  };
+
+  const handleAuth = async (overrideEmail, overridePassword) => {
     setAuthError("");
-    if (!authForm.email || !authForm.password) { setAuthError("Please fill all fields"); return; }
+    const emailRaw = overrideEmail ?? authForm.email;
+    const passwordRaw = overridePassword ?? authForm.password;
+    if (!emailRaw || !passwordRaw) { setAuthError("Please fill all fields"); return; }
     if (authMode === "signup" && !authForm.name) { setAuthError("Please enter your name"); return; }
+    if (authMode === "signup" && authForm.role === "business" && !authForm.companyName) { setAuthError("Please enter your company name"); return; }
     setAuthLoading(true);
     try {
-      const userKey = `user:${authForm.email.toLowerCase().trim()}`;
-      const existing = await storage.get(userKey);
-      if (authMode === "login") {
+      const emailLc = emailRaw.toLowerCase().trim();
+      const userKey = `user:${emailLc}`;
+      let existing = await storage.get(userKey);
+      // Self-heal: demo accounts may not have finished seeding yet, or storage was cleared.
+      const demoSeed = DEMO_SEED_ACCOUNTS[emailLc];
+      if (!existing?.value && demoSeed && passwordRaw === demoSeed.password) {
+        await storage.set(userKey, demoSeed);
+        existing = await storage.get(userKey);
+      }
+      if (authMode === "login" || overrideEmail) {
         if (!existing?.value) { setAuthError("No account found. Please sign up."); setAuthLoading(false); return; }
         const ud = JSON.parse(existing.value);
-        if (ud.password !== authForm.password) { setAuthError("Incorrect password"); setAuthLoading(false); return; }
-        const u = { id: ud.id, name: ud.name, email: ud.email, joinedAt: ud.joinedAt };
-        setUser(u); sessionStorage.setItem("caseos_user", JSON.stringify(u)); setScreen("dashboard");
+        if (ud.password !== passwordRaw) { setAuthError("Incorrect password"); setAuthLoading(false); return; }
+        const u = { id: ud.id, name: ud.name, email: ud.email, role: ud.role || "student", companyName: ud.companyName || "", industry: ud.industry || "", college: ud.college || "", joinedAt: ud.joinedAt };
+        setUser(u); sessionStorage.setItem("caseos_user", JSON.stringify(u));
+        setScreen(u.role === "admin" ? "admin" : u.role === "business" ? "bizDashboard" : "dashboard");
       } else {
         if (existing?.value) { setAuthError("Account already exists. Please log in."); setAuthLoading(false); return; }
-        const nu = { id: `u_${Date.now()}`, name: authForm.name, email: authForm.email.toLowerCase().trim(), password: authForm.password, joinedAt: new Date().toISOString() };
+        const nu = { id: `u_${Date.now()}`, name: authForm.name, email: emailLc, password: passwordRaw, role: authForm.role || "student", companyName: authForm.companyName || "", industry: authForm.industry || "", college: authForm.college || "", joinedAt: new Date().toISOString() };
         await storage.set(userKey, nu);
-        const u = { id: nu.id, name: nu.name, email: nu.email, joinedAt: nu.joinedAt };
-        setUser(u); sessionStorage.setItem("caseos_user", JSON.stringify(u)); setScreen("dashboard");
+        const u = { id: nu.id, name: nu.name, email: nu.email, role: nu.role, companyName: nu.companyName, industry: nu.industry, college: nu.college, joinedAt: nu.joinedAt };
+        setUser(u); sessionStorage.setItem("caseos_user", JSON.stringify(u));
+        setScreen(u.role === "business" ? "bizDashboard" : "dashboard");
       }
     } catch { setAuthError("Something went wrong. Try again."); }
     setAuthLoading(false);
@@ -418,7 +464,166 @@ export default function CaseOS() {
 
   const logout = () => { sessionStorage.removeItem("caseos_user"); setUser(null); setScreen("auth"); };
 
-  const allCases = [...CASES, ...customCases];
+  // ── Business / Admin data helpers ──────────────────────────────────────
+  const loadAllProblems = async () => {
+    const result = await storage.list("problem:");
+    const list = [];
+    if (result?.keys) {
+      for (const key of result.keys) {
+        const data = await storage.get(key);
+        if (data?.value) list.push(JSON.parse(data.value));
+      }
+    }
+    return list.sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt));
+  };
+
+  const countSubmissions = async (problemId) => {
+    const result = await storage.list(`submission:${problemId}:`);
+    return result?.keys?.length || 0;
+  };
+
+  const loadSubmissionsFor = async (problemId) => {
+    const result = await storage.list(`submission:${problemId}:`);
+    const subs = [];
+    if (result?.keys) {
+      for (const key of result.keys) {
+        const data = await storage.get(key);
+        if (data?.value) subs.push(JSON.parse(data.value));
+      }
+    }
+    return subs.sort((a, b) => (b.score || 0) - (a.score || 0));
+  };
+
+  const openProblemDetail = async (p) => {
+    setViewingProblem(p);
+    setProblemSubmissions(await loadSubmissionsFor(p.id));
+  };
+
+  const loadPublishedProblems = async () => {
+    const all = await loadAllProblems();
+    setPublishedProblems(all.filter(p => p.status === "published"));
+  };
+
+  const loadBizProblems = async () => {
+    const all = await loadAllProblems();
+    const mine = all.filter(p => p.ownerId === user.id);
+    for (const p of mine) p._submissionCount = await countSubmissions(p.id);
+    setBizProblems(mine);
+  };
+
+  const loadAdminData = async () => {
+    setAdminLoading(true);
+    const result = await storage.list("user:");
+    const students = [], businesses = [];
+    if (result?.keys) {
+      for (const key of result.keys) {
+        const data = await storage.get(key);
+        if (!data?.value) continue;
+        const u = JSON.parse(data.value);
+        if (u.role === "student") students.push(u);
+        else if (u.role === "business") businesses.push(u);
+      }
+    }
+    const problems = await loadAllProblems();
+    for (const p of problems) p._submissionCount = await countSubmissions(p.id);
+    for (const s of students) {
+      const prog = await storage.list(`progress:${s.id}:`);
+      let completed = 0, totalScore = 0;
+      if (prog?.keys) {
+        for (const key of prog.keys) {
+          const d = await storage.get(key);
+          if (d?.value) { const pd = JSON.parse(d.value); if (pd.scorecard) { completed++; totalScore += pd.scorecard.overall || 0; } }
+        }
+      }
+      s._completed = completed;
+      s._avgScore = completed ? Math.round(totalScore / completed) : 0;
+    }
+    for (const b of businesses) b._problemCount = problems.filter(p => p.ownerId === b.id).length;
+    setAdminStudents(students);
+    setAdminBusinesses(businesses);
+    setAdminProblems(problems);
+    setAdminLoading(false);
+  };
+
+  const approveProblem = async (p) => { await storage.set(`problem:${p.id}`, { ...p, status: "published", approvedAt: new Date().toISOString() }); loadAdminData(); };
+  const rejectProblem = async (p) => { await storage.set(`problem:${p.id}`, { ...p, status: "rejected" }); loadAdminData(); };
+
+  const PROBLEM_INTAKE_PROMPT = `You are a sharp intake analyst for CaseOS, a platform where startups post real business problems for students to solve. A business owner is describing their problem to you.
+
+YOUR JOB: Ask precise, one-at-a-time clarifying questions to remove ambiguity and assumptions before this becomes a case study — e.g. clarify numbers, timeframes, what's already been tried, budget, team size, and what "success" would look like. Do not solve the problem or suggest answers. Keep each question short (1-3 sentences). After 4-6 solid exchanges, say clearly: "I think I have enough to draft this as a case — click Finalize below when you're ready." Never fabricate any facts not given to you.`;
+
+  const startProblemIntake = () => {
+    setProblemInput("");
+    setProblemReadyToFinalize(false);
+    setScreen("postProblem");
+    setProblemChat([{ role: "assistant", content: "Tell me about the business problem you'd like candidates to solve. What's the situation, and what specifically do you need help figuring out?" }]);
+  };
+
+  const sendProblemMessage = async () => {
+    if (!problemInput.trim() || problemChatLoading) return;
+    const userMsg = problemInput.trim();
+    setProblemInput("");
+    const updated = [...problemChat, { role: "user", content: userMsg }];
+    setProblemChat(updated);
+    setProblemChatLoading(true);
+    try {
+      const res = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 500, system: PROBLEM_INTAKE_PROMPT, messages: updated.map(m => ({ role: m.role, content: m.content })) }),
+      });
+      const data = await res.json();
+      const reply = data.content?.[0]?.text || "Can you tell me more about that?";
+      const final = [...updated, { role: "assistant", content: reply }];
+      setProblemChat(final);
+      if (final.filter(m => m.role === "user").length >= 4) setProblemReadyToFinalize(true);
+    } catch {
+      setProblemChat([...updated, { role: "assistant", content: "Got it — can you add a bit more detail on that?" }]);
+    }
+    setProblemChatLoading(false);
+  };
+
+  const finalizeProblem = async () => {
+    setFinalizingProblem(true);
+    const req = `Based on our entire conversation, output ONLY a JSON object (no markdown, no backticks) structuring this into a case study:
+{"title":"One-line problem headline","brief":"2-4 paragraph case brief written for a candidate to read, using ONLY facts from this conversation","difficulty":"Beginner|Intermediate|Advanced","category":"short category label","tags":["tag1","tag2","tag3"]}`;
+    try {
+      const res = await fetch("/api/claude", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ model: "claude-sonnet-4-6", max_tokens: 800, system: PROBLEM_INTAKE_PROMPT, messages: [...problemChat.map(m => ({ role: m.role, content: m.content })), { role: "user", content: req }] }),
+      });
+      const data = await res.json();
+      const text = data.content?.[0]?.text || "{}";
+      const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
+      const id = `problem_${Date.now()}`;
+      const conversationFacts = problemChat.map(m => `${m.role === "user" ? "Business" : "Analyst"}: ${m.content}`).join("\n");
+      const problem = {
+        id, ownerId: user.id, ownerCompany: user.companyName || user.name,
+        title: parsed.title || "Untitled Problem", brief: parsed.brief || "",
+        difficulty: parsed.difficulty || "Intermediate", category: parsed.category || "Business Strategy",
+        tags: Array.isArray(parsed.tags) ? parsed.tags : [], color: "#00D4A0", icon: "🚀",
+        status: "pending_review", createdAt: new Date().toISOString(), company: user.companyName || user.name,
+        systemPrompt: `You are an elite business mentor on CaseOS. The candidate is solving a real case submitted by ${user.companyName || user.name}.
+
+VERIFIED REAL FACTS (from the business owner's intake conversation — use ONLY these, never invent additional details):
+${conversationFacts}
+
+CRITICAL: These are the only facts you know. If the candidate asks for data not covered above, ask them what they'd want to find out and why — never fabricate numbers, names, or details.
+
+YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never give solutions. After 6+ exchanges, offer to generate a scorecard. Keep responses to 3-4 sentences.`,
+      };
+      await storage.set(`problem:${id}`, problem);
+      setBizProblems(prev => [problem, ...prev]);
+      setScreen("bizDashboard");
+    } catch {
+      alert("Couldn't finalize the problem — please try again.");
+    }
+    setFinalizingProblem(false);
+  };
+
+  const diffRank = { Beginner: 0, Intermediate: 1, Advanced: 2, Custom: 1 };
+  const allCases = [...CASES, ...customCases, ...publishedProblems].sort((a, b) => (diffRank[a.difficulty] ?? 1) - (diffRank[b.difficulty] ?? 1));
 
   const startCase = async (c, isReattempt = false) => {
     setSelectedCase(c);
@@ -441,7 +646,7 @@ export default function CaseOS() {
     if (isReattempt) await saveProgress(c.id, { messages: [], scorecard: null, startedAt: new Date().toISOString(), attempts: (prog?.attempts || 0) + 1 });
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -473,7 +678,7 @@ export default function CaseOS() {
     const shouldOffer = exchangeCount.current >= 6;
 
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -503,7 +708,7 @@ export default function CaseOS() {
     const scoreReq = `Based on our entire conversation, generate a JSON scorecard only. Pure JSON, no markdown, no backticks:
 {"overall":82,"title":"Sharp Strategic Thinker","verdict":"One honest sentence summary.","scores":[{"label":"Problem Framing","score":80,"note":"Specific observation"},{"label":"Data Thinking","score":72,"note":"Specific observation"},{"label":"Creative Solutions","score":85,"note":"Specific observation"},{"label":"Communication","score":78,"note":"Specific observation"},{"label":"Adaptability","score":80,"note":"Specific observation"}],"strengths":["Strength 1","Strength 2"],"improve":["Gap 1","Gap 2"],"vc_signal":"One sentence — would a VC or company want to talk to this person?","next_case":"One sentence recommendation for what to study next"}`;
     try {
-      const res = await fetch("https://api.anthropic.com/v1/messages", {
+      const res = await fetch("/api/claude", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -517,10 +722,16 @@ export default function CaseOS() {
       const parsed = JSON.parse(text.replace(/```json|```/g, "").trim());
       setScorecard(parsed);
       await saveProgress(selectedCase.id, { messages, scorecard: parsed, startedAt: userProgress[selectedCase.id]?.startedAt, completedAt: new Date().toISOString(), attempts: userProgress[selectedCase.id]?.attempts || 1 });
+      if (selectedCase.ownerId) {
+        await storage.set(`submission:${selectedCase.id}:${user.id}`, { userId: user.id, userName: user.name, score: parsed.overall, title: parsed.title, completedAt: new Date().toISOString() });
+      }
     } catch {
       const fb = { overall: 74, title: "Promising Thinker", verdict: "Strong instincts, needs sharper frameworks.", scores: [{ label: "Problem Framing", score: 76, note: "Good initial diagnosis" }, { label: "Data Thinking", score: 65, note: "Needs quantitative backing" }, { label: "Creative Solutions", score: 80, note: "Original ideas" }, { label: "Communication", score: 78, note: "Clear and direct" }, { label: "Adaptability", score: 72, note: "Adjusted well to new info" }], strengths: ["Clear thinking", "Practical suggestions"], improve: ["Back ideas with numbers", "Think second-order"], vc_signal: "Interesting — would revisit with stronger structure.", next_case: "Study unit economics frameworks next." };
       setScorecard(fb);
       await saveProgress(selectedCase.id, { messages, scorecard: fb, startedAt: userProgress[selectedCase.id]?.startedAt, completedAt: new Date().toISOString(), attempts: userProgress[selectedCase.id]?.attempts || 1 });
+      if (selectedCase.ownerId) {
+        await storage.set(`submission:${selectedCase.id}:${user.id}`, { userId: user.id, userName: user.name, score: fb.overall, title: fb.title, completedAt: new Date().toISOString() });
+      }
     }
     setScorecardLoading(false);
   };
@@ -561,6 +772,43 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
   const scoreColor = s => s >= 75 ? G.green : s >= 60 ? "#FFB347" : G.red;
   const refs = selectedCase ? (REFERENCES[selectedCase.id] || null) : null;
 
+  const problemDetailModal = viewingProblem ? (
+    <div style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.85)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100, padding: 20 }} onClick={() => setViewingProblem(null)}>
+      <div style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 16, padding: 28, width: "100%", maxWidth: 560, maxHeight: "85vh", overflowY: "auto" }} onClick={e => e.stopPropagation()}>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 6 }}>
+          <div>
+            <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 17 }}>{viewingProblem.title}</div>
+            <div style={{ fontSize: 12, color: G.muted, marginTop: 4 }}>{viewingProblem.company} · {viewingProblem.difficulty}</div>
+          </div>
+          <button onClick={() => setViewingProblem(null)} className="btn" style={{ background: "none", border: "none", color: G.muted, fontSize: 20, cursor: "pointer" }}>×</button>
+        </div>
+        <div style={{ fontSize: 13, color: "#C8C4DC", lineHeight: 1.7, margin: "16px 0", whiteSpace: "pre-wrap" }}>{viewingProblem.brief}</div>
+        {user?.role === "admin" && viewingProblem.status === "pending_review" && (
+          <div style={{ display: "flex", gap: 10, marginBottom: 20 }}>
+            <button onClick={async () => { await approveProblem(viewingProblem); setViewingProblem(null); }} className="btn" style={{ flex: 1, background: G.green, color: "#08120E", border: "none", borderRadius: 10, padding: "11px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>✓ Approve &amp; Publish</button>
+            <button onClick={async () => { await rejectProblem(viewingProblem); setViewingProblem(null); }} className="btn" style={{ flex: 1, background: "rgba(255,77,109,0.1)", color: G.red, border: "1px solid rgba(255,77,109,0.3)", borderRadius: 10, padding: "11px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>✕ Reject</button>
+          </div>
+        )}
+        <div style={{ fontSize: 11, fontWeight: 600, color: G.muted, letterSpacing: "0.5px", marginBottom: 12 }}>SUBMISSIONS ({problemSubmissions.length})</div>
+        {problemSubmissions.length === 0 ? (
+          <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: "20px 0" }}>No candidates have completed this yet.</div>
+        ) : (
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {problemSubmissions.map((s, i) => (
+              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 14px" }}>
+                <div>
+                  <div style={{ fontSize: 13, fontWeight: 600 }}>{i === 0 ? "🥇 " : i === 1 ? "🥈 " : i === 2 ? "🥉 " : ""}{s.userName}</div>
+                  <div style={{ fontSize: 11, color: G.muted }}>{s.title}</div>
+                </div>
+                <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 18, color: scoreColor(s.score) }}>{s.score}</div>
+              </div>
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  ) : null;
+
   // ── SPLASH ──────────────────────────────────────────────────────────────
   if (screen === "splash") return (
     <div style={{ height: "100vh", background: G.bg, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Inter" }}>
@@ -592,8 +840,27 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
               </button>
             ))}
           </div>
+          {authMode === "signup" && (
+            <div style={{ display: "flex", gap: 8, marginBottom: 16 }}>
+              {[{ id: "student", label: "🎓 Student" }, { id: "business", label: "🏢 Startup / Business" }].map(r => (
+                <button key={r.id} onClick={() => setAuthForm(p => ({ ...p, role: r.id }))} className="btn"
+                  style={{ flex: 1, padding: "9px 6px", borderRadius: 8, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "Inter", border: `1px solid ${authForm.role === r.id ? G.accent : G.border}`, background: authForm.role === r.id ? G.accentDim : "transparent", color: authForm.role === r.id ? G.accent : G.muted }}>
+                  {r.label}
+                </button>
+              ))}
+            </div>
+          )}
           <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
-            {authMode === "signup" && <input value={authForm.name} onChange={e => setAuthForm(p => ({ ...p, name: e.target.value }))} placeholder="Full name" style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />}
+            {authMode === "signup" && <input value={authForm.name} onChange={e => setAuthForm(p => ({ ...p, name: e.target.value }))} placeholder={authForm.role === "business" ? "Your name" : "Full name"} style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />}
+            {authMode === "signup" && authForm.role === "business" && (
+              <>
+                <input value={authForm.companyName} onChange={e => setAuthForm(p => ({ ...p, companyName: e.target.value }))} placeholder="Company / Startup name" style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />
+                <input value={authForm.industry} onChange={e => setAuthForm(p => ({ ...p, industry: e.target.value }))} placeholder="Industry (e.g. F&B, SaaS, Retail)" style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />
+              </>
+            )}
+            {authMode === "signup" && authForm.role === "student" && (
+              <input value={authForm.college} onChange={e => setAuthForm(p => ({ ...p, college: e.target.value }))} placeholder="College / Organisation (optional)" style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />
+            )}
             <input value={authForm.email} onChange={e => setAuthForm(p => ({ ...p, email: e.target.value }))} placeholder="Email address" type="email" style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />
             <input value={authForm.password} onChange={e => setAuthForm(p => ({ ...p, password: e.target.value }))} placeholder="Password" type="password" onKeyDown={e => e.key === "Enter" && handleAuth()} style={{ background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "11px 14px", color: G.text, fontSize: 14, fontFamily: "Inter" }} />
           </div>
@@ -602,15 +869,20 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
             {authLoading ? "Please wait..." : authMode === "login" ? "Sign In →" : "Create Account →"}
           </button>
         </div>
-        {/* Demo account */}
+        {/* Demo accounts */}
         <div style={{ marginTop: 14, background: G.accentDim, border: `1px solid ${G.accentBorder}`, borderRadius: 12, padding: "14px 18px" }}>
-          <div style={{ fontSize: 11, fontWeight: 600, color: G.accent, marginBottom: 8, letterSpacing: "0.5px" }}>DEMO ACCOUNT</div>
-          <div style={{ fontSize: 13, color: G.text, marginBottom: 4 }}>📧 <span style={{ color: G.muted }}>Email:</span> <b>demo@caseos.in</b></div>
-          <div style={{ fontSize: 13, color: G.text, marginBottom: 12 }}>🔑 <span style={{ color: G.muted }}>Password:</span> <b>caseos123</b></div>
-          <button onClick={() => { setAuthForm({ name: "", email: "demo@caseos.in", password: "caseos123" }); setAuthMode("login"); }} className="btn"
-            style={{ width: "100%", background: G.accent, color: "#fff", border: "none", borderRadius: 8, padding: "9px", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>
-            Auto-fill & Sign In →
-          </button>
+          <div style={{ fontSize: 11, fontWeight: 600, color: G.accent, marginBottom: 10, letterSpacing: "0.5px" }}>TRY A DEMO ACCOUNT</div>
+          {[
+            { label: "🎓 Student", email: "demo@caseos.in", password: "caseos123" },
+            { label: "🏢 Business", email: "business@caseos.in", password: "biz123" },
+            { label: "⚙ Admin", email: "admin@caseos.in", password: "admin123" },
+          ].map(d => (
+            <button key={d.email} onClick={() => { setAuthForm(p => ({ ...p, name: "", email: d.email, password: d.password })); setAuthMode("login"); handleAuth(); }} className="btn"
+              style={{ width: "100%", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 8, padding: "9px 12px", marginBottom: 6, color: G.text, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "Inter", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+              <span>{d.label}</span>
+              <span style={{ color: G.accent, fontSize: 11 }}>Sign in →</span>
+            </button>
+          ))}
         </div>
       </div>
     </div>
@@ -752,6 +1024,245 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
             </div>
           </div>
         )}
+      </div>
+    );
+  }
+
+  // ── BUSINESS DASHBOARD ──────────────────────────────────────────────────
+  if (screen === "bizDashboard") {
+    const statusMeta = {
+      pending_review: { label: "⏳ Pending Review", color: "#FFB347", bg: "rgba(255,179,71,0.1)", border: "rgba(255,179,71,0.25)" },
+      published: { label: "✓ Live", color: G.green, bg: "rgba(0,212,160,0.1)", border: "rgba(0,212,160,0.25)" },
+      rejected: { label: "✕ Rejected", color: G.red, bg: "rgba(255,77,109,0.1)", border: "rgba(255,77,109,0.25)" },
+    };
+    return (
+      <div style={{ minHeight: "100vh", background: G.bg, fontFamily: "Inter", color: G.text }}>
+        <style>{css}</style>
+        <div style={{ padding: "14px 24px", borderBottom: `1px solid ${G.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: G.bg, zIndex: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 30, height: 30, background: `linear-gradient(135deg, ${G.accent}, #A594FF)`, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 14, color: "#fff" }}>C</div>
+            <span style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16 }}>CaseOS</span>
+            <span style={{ fontSize: 11, color: G.muted, background: G.surface, border: `1px solid ${G.border}`, borderRadius: 20, padding: "2px 9px", marginLeft: 4 }}>🏢 {user.companyName || "Business"}</span>
+          </div>
+          <div style={{ display: "flex", gap: 10, alignItems: "center" }}>
+            <button onClick={startProblemIntake} className="btn" style={{ background: G.accent, border: "none", borderRadius: 8, padding: "8px 16px", color: "#fff", fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>+ Post New Problem</button>
+            <button onClick={logout} className="btn" style={{ background: "none", border: `1px solid ${G.border}`, borderRadius: 8, padding: "6px 14px", color: G.muted, fontSize: 12, cursor: "pointer", fontFamily: "Inter" }}>Sign out</button>
+          </div>
+        </div>
+
+        <div style={{ maxWidth: 800, margin: "0 auto", padding: "32px 20px 80px" }}>
+          <div style={{ display: "grid", gridTemplateColumns: "repeat(3,1fr)", gap: 12, marginBottom: 36 }}>
+            {[
+              { label: "Problems Posted", value: bizProblems.length, color: G.accent },
+              { label: "Live", value: bizProblems.filter(p => p.status === "published").length, color: G.green },
+              { label: "Total Submissions", value: bizProblems.reduce((sum, p) => sum + (p._submissionCount || 0), 0), color: "#FFB347" },
+            ].map(s => (
+              <div key={s.label} style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12, padding: "18px 20px" }}>
+                <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 30, color: s.color }}>{s.value}</div>
+                <div style={{ fontSize: 12, color: G.muted, marginTop: 3 }}>{s.label}</div>
+              </div>
+            ))}
+          </div>
+
+          <h2 style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 17, marginBottom: 16 }}>Your Problems</h2>
+
+          {bizProblems.length === 0 ? (
+            <div style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14, padding: "40px 24px", textAlign: "center" }}>
+              <div style={{ fontSize: 28, marginBottom: 10 }}>📝</div>
+              <div style={{ fontSize: 14, color: G.muted, marginBottom: 18 }}>You haven't posted a problem yet. The AI will ask you a few sharp questions to turn it into a proper case.</div>
+              <button onClick={startProblemIntake} className="btn" style={{ background: G.accent, color: "#fff", border: "none", borderRadius: 10, padding: "11px 20px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>Post Your First Problem →</button>
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {bizProblems.map(p => {
+                const meta = statusMeta[p.status] || statusMeta.pending_review;
+                return (
+                  <div key={p.id} className="hc" style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14, padding: "18px 22px", cursor: "pointer" }} onClick={() => openProblemDetail(p)}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", gap: 12 }}>
+                      <div style={{ flex: 1 }}>
+                        <div style={{ display: "flex", gap: 8, marginBottom: 8, flexWrap: "wrap" }}>
+                          <span style={{ fontSize: 11, fontWeight: 600, color: meta.color, background: meta.bg, border: `1px solid ${meta.border}`, borderRadius: 20, padding: "2px 9px" }}>{meta.label}</span>
+                          <span style={{ fontSize: 11, color: G.muted, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 20, padding: "2px 9px" }}>{p.difficulty}</span>
+                        </div>
+                        <div style={{ fontFamily: "Space Grotesk", fontWeight: 600, fontSize: 15 }}>{p.title}</div>
+                      </div>
+                      <div style={{ textAlign: "center", flexShrink: 0 }}>
+                        <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 20, color: G.accent }}>{p._submissionCount || 0}</div>
+                        <div style={{ fontSize: 10, color: G.muted }}>submissions</div>
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {problemDetailModal}
+      </div>
+    );
+  }
+
+  // ── POST PROBLEM (AI clarifying-question intake) ────────────────────────
+  if (screen === "postProblem") {
+    return (
+      <div style={{ height: "100vh", background: G.bg, fontFamily: "Inter", color: G.text, display: "flex", flexDirection: "column" }}>
+        <style>{css}</style>
+        <div style={{ padding: "14px 20px", borderBottom: `1px solid ${G.border}`, display: "flex", alignItems: "center", gap: 12 }}>
+          <button onClick={() => setScreen("bizDashboard")} className="btn" style={{ background: "none", border: "none", color: G.muted, cursor: "pointer", fontSize: 20, lineHeight: 1 }}>←</button>
+          <div>
+            <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 15 }}>Post a Problem</div>
+            <div style={{ fontSize: 11, color: G.muted }}>AI will ask a few questions to remove assumptions</div>
+          </div>
+        </div>
+
+        <div style={{ flex: 1, overflowY: "auto", padding: "20px" }}>
+          <div style={{ maxWidth: 640, margin: "0 auto" }}>
+            {problemChat.map((m, i) => (
+              <div key={i} className="fi" style={{ display: "flex", justifyContent: m.role === "user" ? "flex-end" : "flex-start", marginBottom: 12 }}>
+                <div style={{ maxWidth: "80%", padding: "11px 15px", borderRadius: m.role === "user" ? "16px 16px 4px 16px" : "16px 16px 16px 4px", background: m.role === "user" ? G.accent : G.surface, border: m.role === "user" ? "none" : `1px solid ${G.border}`, fontSize: 14, lineHeight: 1.65, color: m.role === "user" ? "#fff" : "#C8C4DC", whiteSpace: "pre-wrap" }}>
+                  {m.content}
+                </div>
+              </div>
+            ))}
+            {problemChatLoading && (
+              <div style={{ display: "flex", gap: 4, padding: "6px 15px" }}>
+                <div className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: G.muted }} />
+                <div className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: G.muted, animationDelay: "0.15s" }} />
+                <div className="dot" style={{ width: 6, height: 6, borderRadius: "50%", background: G.muted, animationDelay: "0.3s" }} />
+              </div>
+            )}
+            <div ref={problemChatEndRef} />
+          </div>
+        </div>
+
+        <div style={{ borderTop: `1px solid ${G.border}`, padding: 16 }}>
+          <div style={{ maxWidth: 640, margin: "0 auto" }}>
+            {problemReadyToFinalize && (
+              <button onClick={finalizeProblem} disabled={finalizingProblem} className="btn" style={{ width: "100%", marginBottom: 10, background: G.green, color: "#08120E", border: "none", borderRadius: 10, padding: "13px", fontSize: 14, fontWeight: 700, cursor: "pointer", fontFamily: "Inter" }}>
+                {finalizingProblem ? "Structuring your case..." : "✓ Finalize Problem →"}
+              </button>
+            )}
+            <div style={{ display: "flex", gap: 10 }}>
+              <textarea value={problemInput} onChange={e => setProblemInput(e.target.value)} placeholder="Type your answer..." rows={1}
+                onKeyDown={e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendProblemMessage(); } }}
+                style={{ flex: 1, background: G.surface, border: `1px solid ${G.border}`, borderRadius: 10, padding: "12px 14px", color: G.text, fontSize: 14, fontFamily: "Inter", lineHeight: 1.5 }} />
+              <button onClick={sendProblemMessage} disabled={problemChatLoading || !problemInput.trim()} className="btn" style={{ background: G.accent, color: "#fff", border: "none", borderRadius: 10, padding: "0 20px", fontSize: 14, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>Send</button>
+            </div>
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // ── ADMIN ────────────────────────────────────────────────────────────────
+  if (screen === "admin") {
+    const pendingCount = adminProblems.filter(p => p.status === "pending_review").length;
+    const statusMeta = {
+      pending_review: { label: "⏳ Pending", color: "#FFB347", bg: "rgba(255,179,71,0.1)", border: "rgba(255,179,71,0.25)" },
+      published: { label: "✓ Live", color: G.green, bg: "rgba(0,212,160,0.1)", border: "rgba(0,212,160,0.25)" },
+      rejected: { label: "✕ Rejected", color: G.red, bg: "rgba(255,77,109,0.1)", border: "rgba(255,77,109,0.25)" },
+    };
+    return (
+      <div style={{ minHeight: "100vh", background: G.bg, fontFamily: "Inter", color: G.text }}>
+        <style>{css}</style>
+        <div style={{ padding: "14px 24px", borderBottom: `1px solid ${G.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: G.bg, zIndex: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 30, height: 30, background: `linear-gradient(135deg, ${G.accent}, #A594FF)`, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 14, color: "#fff" }}>C</div>
+            <span style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16 }}>CaseOS</span>
+            <span style={{ fontSize: 11, color: G.accent, background: G.accentDim, border: `1px solid ${G.accentBorder}`, borderRadius: 20, padding: "2px 9px", marginLeft: 4 }}>⚙ Admin</span>
+          </div>
+          <button onClick={logout} className="btn" style={{ background: "none", border: `1px solid ${G.border}`, borderRadius: 8, padding: "6px 14px", color: G.muted, fontSize: 12, cursor: "pointer", fontFamily: "Inter" }}>Sign out</button>
+        </div>
+
+        <div style={{ maxWidth: 960, margin: "0 auto", padding: "24px 20px 80px" }}>
+          <div style={{ display: "flex", gap: 4, background: G.surface, border: `1px solid ${G.border}`, borderRadius: 10, padding: 4, marginBottom: 28, width: "fit-content" }}>
+            {[
+              { id: "overview", label: "Overview" },
+              { id: "students", label: `Students (${adminStudents.length})` },
+              { id: "businesses", label: `Businesses (${adminBusinesses.length})` },
+              { id: "problems", label: `Problems (${adminProblems.length})${pendingCount ? ` · ${pendingCount} pending` : ""}` },
+            ].map(t => (
+              <button key={t.id} onClick={() => setAdminTab(t.id)} className="btn" style={{ padding: "8px 14px", border: "none", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "Inter", background: adminTab === t.id ? G.accent : "transparent", color: adminTab === t.id ? "#fff" : G.muted, whiteSpace: "nowrap" }}>
+                {t.label}
+              </button>
+            ))}
+          </div>
+
+          {adminLoading ? (
+            <div style={{ textAlign: "center", padding: 60, color: G.muted, fontSize: 13 }}>Loading...</div>
+          ) : adminTab === "overview" ? (
+            <div style={{ display: "grid", gridTemplateColumns: "repeat(auto-fit, minmax(150px, 1fr))", gap: 12 }}>
+              {[
+                { label: "Students", value: adminStudents.length, color: G.accent },
+                { label: "Businesses", value: adminBusinesses.length, color: G.accent },
+                { label: "Pending Review", value: pendingCount, color: "#FFB347" },
+                { label: "Live Problems", value: adminProblems.filter(p => p.status === "published").length, color: G.green },
+                { label: "Total Submissions", value: adminProblems.reduce((sum, p) => sum + (p._submissionCount || 0), 0), color: G.accent },
+              ].map(s => (
+                <div key={s.label} style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12, padding: "18px 20px" }}>
+                  <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 26, color: s.color }}>{s.value}</div>
+                  <div style={{ fontSize: 12, color: G.muted, marginTop: 3 }}>{s.label}</div>
+                </div>
+              ))}
+            </div>
+          ) : adminTab === "students" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {adminStudents.length === 0 && <div style={{ color: G.muted, fontSize: 13, textAlign: "center", padding: 40 }}>No students yet.</div>}
+              {adminStudents.map(s => (
+                <div key={s.id} style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12, padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{s.name}</div>
+                    <div style={{ fontSize: 11, color: G.muted }}>{s.email}{s.college ? ` · ${s.college}` : ""}</div>
+                  </div>
+                  <div style={{ display: "flex", gap: 18, textAlign: "center" }}>
+                    <div><div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16 }}>{s._completed}</div><div style={{ fontSize: 10, color: G.muted }}>solved</div></div>
+                    <div><div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16, color: scoreColor(s._avgScore) }}>{s._avgScore || "—"}</div><div style={{ fontSize: 10, color: G.muted }}>avg score</div></div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : adminTab === "businesses" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {adminBusinesses.length === 0 && <div style={{ color: G.muted, fontSize: 13, textAlign: "center", padding: 40 }}>No businesses yet.</div>}
+              {adminBusinesses.map(b => (
+                <div key={b.id} style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12, padding: "14px 18px", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  <div>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{b.companyName || b.name}</div>
+                    <div style={{ fontSize: 11, color: G.muted }}>{b.name} · {b.email}{b.industry ? ` · ${b.industry}` : ""}</div>
+                  </div>
+                  <div style={{ textAlign: "center" }}>
+                    <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16, color: G.accent }}>{b._problemCount}</div>
+                    <div style={{ fontSize: 10, color: G.muted }}>problems posted</div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              {adminProblems.length === 0 && <div style={{ color: G.muted, fontSize: 13, textAlign: "center", padding: 40 }}>No problems submitted yet.</div>}
+              {adminProblems.map(p => {
+                const meta = statusMeta[p.status] || statusMeta.pending_review;
+                return (
+                  <div key={p.id} className="hc" style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12, padding: "14px 18px", cursor: "pointer", display: "flex", justifyContent: "space-between", alignItems: "center", gap: 12, flexWrap: "wrap" }} onClick={() => openProblemDetail(p)}>
+                    <div>
+                      <div style={{ display: "flex", gap: 8, marginBottom: 6, flexWrap: "wrap" }}>
+                        <span style={{ fontSize: 11, fontWeight: 600, color: meta.color, background: meta.bg, border: `1px solid ${meta.border}`, borderRadius: 20, padding: "2px 9px" }}>{meta.label}</span>
+                        <span style={{ fontSize: 11, color: G.muted, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 20, padding: "2px 9px" }}>{p.difficulty}</span>
+                      </div>
+                      <div style={{ fontSize: 13, fontWeight: 600 }}>{p.title}</div>
+                      <div style={{ fontSize: 11, color: G.muted, marginTop: 2 }}>{p.company}</div>
+                    </div>
+                    <div style={{ textAlign: "center" }}>
+                      <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16, color: G.accent }}>{p._submissionCount || 0}</div>
+                      <div style={{ fontSize: 10, color: G.muted }}>submissions</div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          )}
+        </div>
+        {problemDetailModal}
       </div>
     );
   }
