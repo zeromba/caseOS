@@ -379,6 +379,15 @@ export default function CaseOS() {
           const ex = await storage.get(key);
           if (!ex?.value) await storage.set(key, seed);
         }
+        // One-time demo data seed so a fresh visitor (in any role, in any order)
+        // sees a completed loop instead of empty dashboards. Guarded by a flag
+        // so it never overwrites real data on repeat visits.
+        const seededFlag = await storage.get("demo:seed_v2");
+        if (!seededFlag?.value) {
+          for (const p of DEMO_SEED_PROBLEMS) await storage.set(`problem:${p.id}`, p);
+          await storage.set(`progress:${DEMO_SEED_PROGRESS.studentId}:${DEMO_SEED_PROGRESS.caseId}`, DEMO_SEED_PROGRESS.value);
+          await storage.set("demo:seed_v2", "true");
+        }
       } catch {}
       const saved = sessionStorage.getItem("caseos_user");
       if (saved) {
@@ -421,8 +430,84 @@ export default function CaseOS() {
 
   const DEMO_SEED_ACCOUNTS = {
     "demo@caseos.in": { id: "u_demo_001", name: "Pankaj Demo", email: "demo@caseos.in", password: "caseos123", role: "student", college: "IIM Bengaluru", joinedAt: new Date().toISOString() },
-    "business@caseos.in": { id: "u_biz_001", name: "Ravi Kaka", email: "business@caseos.in", password: "biz123", role: "business", companyName: "Kaka Cafe", industry: "Food & Beverage", joinedAt: new Date().toISOString() },
+    "business@caseos.in": { id: "u_biz_001", name: "Meera Iyer", email: "business@caseos.in", password: "biz123", role: "business", companyName: "Meraki Décor", industry: "Home & Living", joinedAt: new Date().toISOString() },
     "admin@caseos.in": { id: "u_admin_001", name: "CaseOS Admin", email: "admin@caseos.in", password: "admin123", role: "admin", joinedAt: new Date().toISOString() },
+  };
+
+  // Demo problems + a completed scorecard so a first-time visitor sees the full
+  // student → business → admin loop immediately, without manually walking through
+  // the intake chat first. Distinct name from the curated Kaka Cafe case on purpose,
+  // so a business demo login never looks like it already owns a curated case.
+  const DEMO_SEED_PROBLEMS = [
+    {
+      id: "problem_demo_published_001", ownerId: "u_biz_001", ownerCompany: "Meraki Décor",
+      title: "Meraki Décor's festive season sales dropped 40% despite record website traffic",
+      brief: `Meraki Décor is a Bengaluru home decor and furnishing boutique selling handcrafted lamps, wall art, and small furniture online and from a single store in Indiranagar.
+
+During this year's festive season (Oct-Nov), website traffic was the highest it's ever been — up 60% year-on-year — but actual sales were down 40% compared to last festive season. The founder suspects something changed in how visitors are converting, but isn't sure what.
+
+You are the growth consultant brought in to diagnose this. What do you investigate first, and what's your plan?`,
+      difficulty: "Intermediate", category: "Growth & Marketing",
+      tags: ["Conversion", "E-commerce", "D2C", "Festive Season"], color: "#00D4A0", icon: "🪔",
+      status: "published", isCommunity: true, createdAt: new Date(Date.now() - 6 * 86400000).toISOString(), approvedAt: new Date(Date.now() - 5 * 86400000).toISOString(),
+      company: "Meraki Décor",
+      systemPrompt: `You are an elite growth mentor on CaseOS. The candidate is solving a real case submitted by Meraki Décor, a Bengaluru home decor D2C boutique.
+
+VERIFIED REAL FACTS (use ONLY these, never invent additional details):
+- Business: Meraki Décor — handcrafted lamps, wall art, small furniture. Sells online + one Indiranagar store.
+- This festive season: website traffic up 60% YoY, but sales down 40% YoY.
+- Founder does not yet know the cause.
+
+CRITICAL: These are the only facts you know. If the candidate asks for data not covered above (conversion rate, cart abandonment, ad spend, pricing changes), ask them what they'd want to find out and why — never fabricate numbers.
+
+YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never give solutions. After 6+ exchanges, offer to generate a scorecard. Keep responses to 3-4 sentences.`,
+    },
+    {
+      id: "problem_demo_pending_001", ownerId: "u_biz_001", ownerCompany: "Meraki Décor",
+      title: "Meraki Décor wants to open a second store but isn't sure which city",
+      brief: `Meraki Décor has one profitable store in Indiranagar, Bengaluru, plus online sales across India. The founder wants to open a second physical store within the next two quarters but is torn between Bengaluru (a second location) and expanding to a new city entirely (Pune or Hyderabad are on the shortlist).
+
+You are the strategy advisor helping structure this decision.`,
+      difficulty: "Intermediate", category: "Strategy & Expansion",
+      tags: ["Market Entry", "Retail", "D2C"], color: "#00D4A0", icon: "🪔",
+      status: "pending_review", isCommunity: true, createdAt: new Date(Date.now() - 1 * 86400000).toISOString(),
+      company: "Meraki Décor",
+      systemPrompt: `You are an elite strategy mentor on CaseOS. The candidate is solving a real case submitted by Meraki Décor.
+
+VERIFIED REAL FACTS (use ONLY these):
+- One profitable store in Indiranagar, Bengaluru. Also sells online pan-India.
+- Deciding: second Bengaluru store vs. new city (Pune or Hyderabad shortlisted).
+- Timeline: wants to decide and act within two quarters.
+
+YOUR ROLE: Socratic mentor. Ask probing questions, never give solutions. After 6+ exchanges, offer a scorecard. Keep responses to 3-4 sentences.`,
+    },
+  ];
+
+  const DEMO_SEED_PROGRESS = {
+    studentId: "u_demo_001", caseId: "kaka-cafe",
+    value: {
+      messages: [
+        { role: "assistant", content: "Welcome. Kaka Cafe just rebranded and footfall is still dropping. What's your first hypothesis — is this an awareness problem or a conversion problem?" },
+        { role: "user", content: "I think it's awareness — the rebrand probably confused existing regulars and nobody nearby knows the new name yet." },
+        { role: "assistant", content: "That's plausible — but what evidence would separate 'confused regulars' from 'never knew about us at all'? Those need very different fixes." },
+      ],
+      scorecard: {
+        overall: 78, title: "Sharp diagnostic instinct, thin on validation",
+        verdict: "Good first-principles thinking on the awareness-vs-conversion split, but the plan moved to tactics before nailing down which one it actually was.",
+        scores: [
+          { label: "Problem framing", score: 84, note: "Correctly split awareness vs conversion early" },
+          { label: "Evidence-seeking", score: 65, note: "Could have asked for footfall-by-time-of-day data before committing" },
+          { label: "Solution creativity", score: 80, note: "Local, low-budget ideas fit the ₹50,000 constraint well" },
+        ],
+        strengths: ["Split the problem into testable hypotheses early", "Stayed within the stated budget constraint"],
+        improve: ["Validate the hypothesis with cheap evidence before proposing fixes", "Consider the garden seating as a distinct asset to leverage"],
+        vc_signal: "Thinks in hypotheses, not just ideas — worth a follow-up case at Advanced difficulty.",
+        next_case: "Try the Aadit Infra case next — it rewards the same diagnose-before-fixing instinct under more operational complexity.",
+      },
+      startedAt: new Date(Date.now() - 4 * 86400000).toISOString(),
+      completedAt: new Date(Date.now() - 4 * 86400000 + 1800000).toISOString(),
+      attempts: 1,
+    },
   };
 
   const handleAuth = async (overrideEmail, overridePassword) => {
@@ -603,7 +688,7 @@ YOUR JOB: Ask precise, one-at-a-time clarifying questions to remove ambiguity an
         title: parsed.title || "Untitled Problem", brief: parsed.brief || "",
         difficulty: parsed.difficulty || "Intermediate", category: parsed.category || "Business Strategy",
         tags: Array.isArray(parsed.tags) ? parsed.tags : [], color: "#00D4A0", icon: "🚀",
-        status: "pending_review", createdAt: new Date().toISOString(), company: user.companyName || user.name,
+        status: "pending_review", isCommunity: true, createdAt: new Date().toISOString(), company: user.companyName || user.name,
         systemPrompt: `You are an elite business mentor on CaseOS. The candidate is solving a real case submitted by ${user.companyName || user.name}.
 
 VERIFIED REAL FACTS (from the business owner's intake conversation — use ONLY these, never invent additional details):
@@ -940,6 +1025,7 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
                         {isDone && <span style={{ fontSize: 11, fontWeight: 600, color: G.green, background: "rgba(0,212,160,0.1)", border: "1px solid rgba(0,212,160,0.25)", borderRadius: 20, padding: "2px 9px" }}>✓ Solved</span>}
                         {isStarted && <span style={{ fontSize: 11, fontWeight: 600, color: "#FFB347", background: "rgba(255,179,71,0.1)", border: "1px solid rgba(255,179,71,0.25)", borderRadius: 20, padding: "2px 9px" }}>● In Progress</span>}
                         {c.isCustom && <span style={{ fontSize: 11, fontWeight: 600, color: "#A594FF", background: "rgba(165,148,255,0.1)", border: "1px solid rgba(165,148,255,0.25)", borderRadius: 20, padding: "2px 9px" }}>Your Case</span>}
+                        {c.isCommunity && <span style={{ fontSize: 11, fontWeight: 600, color: "#00D4A0", background: "rgba(0,212,160,0.1)", border: "1px solid rgba(0,212,160,0.25)", borderRadius: 20, padding: "2px 9px" }}>🏢 Submitted by {c.ownerCompany}</span>}
                       </div>
                       <div style={{ fontFamily: "Space Grotesk", fontWeight: 600, fontSize: 15, marginBottom: 6, lineHeight: 1.4 }}>{c.title}</div>
                       <div style={{ color: G.muted, fontSize: 13, lineHeight: 1.6, marginBottom: 12 }}>{c.brief.substring(0, 120)}...</div>
