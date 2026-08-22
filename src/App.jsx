@@ -360,6 +360,20 @@ export default function CaseOS() {
   const [problemSubmissions, setProblemSubmissions] = useState([]);
   const [adminTab, setAdminTab] = useState("overview");
   const [adminStudents, setAdminStudents] = useState([]);
+  const [adminExperts, setAdminExperts] = useState([]);
+  const [inviteForm, setInviteForm] = useState({ name: "", email: "", credential: "" });
+  const [inviting, setInviting] = useState(false);
+  const [lastInvite, setLastInvite] = useState(null);
+  const [refMaterial, setRefMaterial] = useState(null);
+  const [refDraft, setRefDraft] = useState({ notes: "", links: "" });
+  const [savingRef, setSavingRef] = useState(false);
+  const [publishedSolution, setPublishedSolution] = useState(null);
+  const [viewingTranscript, setViewingTranscript] = useState(null);
+  const [expertQueue, setExpertQueue] = useState([]);
+  const [expertLoading, setExpertLoading] = useState(false);
+  const [expertCaseOpen, setExpertCaseOpen] = useState(null);
+  const [solutionDraft, setSolutionDraft] = useState("");
+  const [publishingSolution, setPublishingSolution] = useState(false);
   const [adminBusinesses, setAdminBusinesses] = useState([]);
   const [adminProblems, setAdminProblems] = useState([]);
   const [adminLoading, setAdminLoading] = useState(false);
@@ -393,7 +407,7 @@ export default function CaseOS() {
       if (saved) {
         const u = JSON.parse(saved);
         setUser(u);
-        setScreen(u.role === "admin" ? "admin" : u.role === "business" ? "bizDashboard" : "dashboard");
+        setScreen(u.role === "admin" ? "admin" : u.role === "business" ? "bizDashboard" : u.role === "expert" ? "expert" : "dashboard");
       }
       else setTimeout(() => setScreen("auth"), 1600);
     };
@@ -404,6 +418,7 @@ export default function CaseOS() {
     if (!user) return;
     if (user.role === "business") loadBizProblems();
     else if (user.role === "admin") loadAdminData();
+    else if (user.role === "expert") loadExpertQueue();
     else { loadProgress(); loadPublishedProblems(); }
   }, [user]);
 
@@ -432,6 +447,7 @@ export default function CaseOS() {
     "demo@caseos.in": { id: "u_demo_001", name: "Pankaj Demo", email: "demo@caseos.in", password: "caseos123", role: "student", college: "IIM Bengaluru", joinedAt: new Date().toISOString() },
     "business@caseos.in": { id: "u_biz_001", name: "Meera Iyer", email: "business@caseos.in", password: "biz123", role: "business", companyName: "Meraki Décor", industry: "Home & Living", joinedAt: new Date().toISOString() },
     "admin@caseos.in": { id: "u_admin_001", name: "CaseOS Admin", email: "admin@caseos.in", password: "admin123", role: "admin", joinedAt: new Date().toISOString() },
+    "expert@caseos.in": { id: "u_expert_001", name: "Dr. Kavita Rao", email: "expert@caseos.in", password: "expert123", role: "expert", credential: "IIM Bangalore, ex-McKinsey", invitedBy: "u_admin_001", joinedAt: new Date().toISOString() },
   };
 
   // Demo problems + a completed scorecard so a first-time visitor sees the full
@@ -534,7 +550,7 @@ YOUR ROLE: Socratic mentor. Ask probing questions, never give solutions. After 6
         if (ud.password !== passwordRaw) { setAuthError("Incorrect password"); setAuthLoading(false); return; }
         const u = { id: ud.id, name: ud.name, email: ud.email, role: ud.role || "student", companyName: ud.companyName || "", industry: ud.industry || "", college: ud.college || "", joinedAt: ud.joinedAt };
         setUser(u); sessionStorage.setItem("caseos_user", JSON.stringify(u));
-        setScreen(u.role === "admin" ? "admin" : u.role === "business" ? "bizDashboard" : "dashboard");
+        setScreen(u.role === "admin" ? "admin" : u.role === "business" ? "bizDashboard" : u.role === "expert" ? "expert" : "dashboard");
       } else {
         if (existing?.value) { setAuthError("Account already exists. Please log in."); setAuthLoading(false); return; }
         const nu = { id: `u_${Date.now()}`, name: authForm.name, email: emailLc, password: passwordRaw, role: authForm.role || "student", companyName: authForm.companyName || "", industry: authForm.industry || "", college: authForm.college || "", joinedAt: new Date().toISOString() };
@@ -582,6 +598,91 @@ YOUR ROLE: Socratic mentor. Ask probing questions, never give solutions. After 6
   const openProblemDetail = async (p) => {
     setViewingProblem(p);
     setProblemSubmissions(await loadSubmissionsFor(p.id));
+    const rm = await loadReferenceMaterial(p.id);
+    setRefMaterial(rm);
+    setRefDraft({ notes: rm?.notes || "", links: (rm?.links || []).map(l => `${l.title} | ${l.url}`).join("\n") });
+    setPublishedSolution(await loadSolution(p.id));
+    setViewingTranscript(null);
+  };
+
+  const loadReferenceMaterial = async (caseId) => {
+    try {
+      const r = await storage.get(`refmaterial:${caseId}`);
+      return r?.value ? JSON.parse(r.value) : null;
+    } catch { return null; }
+  };
+
+  const saveReferenceMaterial = async (caseId) => {
+    setSavingRef(true);
+    const links = refDraft.links.split("\n").map(l => l.trim()).filter(Boolean).map(line => {
+      const [title, url] = line.split("|").map(s => s.trim());
+      return url ? { title: title || url, url } : { title: line, url: line };
+    });
+    const data = { notes: refDraft.notes, links, updatedAt: new Date().toISOString(), updatedBy: user.name };
+    await storage.set(`refmaterial:${caseId}`, data);
+    setRefMaterial(data);
+    setSavingRef(false);
+  };
+
+  const loadSolution = async (caseId) => {
+    try {
+      const r = await storage.get(`solution:${caseId}`);
+      return r?.value ? JSON.parse(r.value) : null;
+    } catch { return null; }
+  };
+
+  const loadTranscript = async (studentId, caseId) => {
+    try {
+      const r = await storage.get(`progress:${studentId}:${caseId}`);
+      return r?.value ? JSON.parse(r.value) : null;
+    } catch { return null; }
+  };
+
+  const inviteExpert = async () => {
+    if (!inviteForm.name || !inviteForm.email) return;
+    setInviting(true);
+    const password = Math.random().toString(36).slice(2, 10);
+    const expert = { id: `u_expert_${Date.now()}`, name: inviteForm.name, email: inviteForm.email, password, role: "expert", credential: inviteForm.credential, invitedBy: user.id, joinedAt: new Date().toISOString() };
+    await storage.set(`user:${inviteForm.email}`, expert);
+    setLastInvite({ email: inviteForm.email, password });
+    setInviteForm({ name: "", email: "", credential: "" });
+    setInviting(false);
+    loadAdminData();
+  };
+
+  const loadExpertQueue = async () => {
+    setExpertLoading(true);
+    const cases = [...CASES, ...(await loadAllProblems()).filter(p => p.status === "published")];
+    const usersResult = await storage.list("user:");
+    const userMap = {};
+    if (usersResult?.keys) {
+      for (const key of usersResult.keys) {
+        const d = await storage.get(key);
+        if (d?.value) { const u = JSON.parse(d.value); userMap[u.id] = u; }
+      }
+    }
+    const queue = [];
+    for (const c of cases) {
+      const subs = await loadSubmissionsFor(c.id);
+      if (!subs.length) continue;
+      const sorted = [...subs].sort((a, b) => (b.score || 0) - (a.score || 0));
+      const topCount = Math.max(1, Math.ceil(sorted.length * 0.1));
+      const top = sorted.slice(0, topCount).map(s => ({ ...s, studentCollege: userMap[s.userId]?.college || "" }));
+      const solution = await loadSolution(c.id);
+      queue.push({ caseId: c.id, caseTitle: c.title, company: c.company, totalAttempts: sorted.length, top, hasSolution: !!solution, solution });
+    }
+    setExpertQueue(queue);
+    setExpertLoading(false);
+  };
+
+  const publishSolution = async (caseId) => {
+    if (!solutionDraft.trim()) return;
+    setPublishingSolution(true);
+    const data = { caseId, expertId: user.id, expertName: user.name, expertCredential: user.credential || "", content: solutionDraft.trim(), publishedAt: new Date().toISOString() };
+    await storage.set(`solution:${caseId}`, data);
+    setSolutionDraft("");
+    setPublishingSolution(false);
+    loadExpertQueue();
   };
 
   const loadPublishedProblems = async () => {
@@ -599,7 +700,7 @@ YOUR ROLE: Socratic mentor. Ask probing questions, never give solutions. After 6
   const loadAdminData = async () => {
     setAdminLoading(true);
     const result = await storage.list("user:");
-    const students = [], businesses = [];
+    const students = [], businesses = [], experts = [];
     if (result?.keys) {
       for (const key of result.keys) {
         const data = await storage.get(key);
@@ -607,8 +708,10 @@ YOUR ROLE: Socratic mentor. Ask probing questions, never give solutions. After 6
         const u = JSON.parse(data.value);
         if (u.role === "student") students.push(u);
         else if (u.role === "business") businesses.push(u);
+        else if (u.role === "expert") experts.push(u);
       }
     }
+    setAdminExperts(experts);
     const problems = await loadAllProblems();
     for (const p of problems) p._submissionCount = await countSubmissions(p.id);
     for (const s of students) {
@@ -718,6 +821,8 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
     exchangeCount.current = 0;
     setScreen("chat");
     setAiLoading(true);
+    setRefMaterial(await loadReferenceMaterial(c.id));
+    setPublishedSolution(await loadSolution(c.id));
 
     const prog = userProgress[c.id];
     if (!isReattempt && prog?.messages?.length > 0) {
@@ -874,21 +979,68 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
             <button onClick={async () => { await rejectProblem(viewingProblem); setViewingProblem(null); }} className="btn" style={{ flex: 1, background: "rgba(255,77,109,0.1)", color: G.red, border: "1px solid rgba(255,77,109,0.3)", borderRadius: 10, padding: "11px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>✕ Reject</button>
           </div>
         )}
-        <div style={{ fontSize: 11, fontWeight: 600, color: G.muted, letterSpacing: "0.5px", marginBottom: 12 }}>SUBMISSIONS ({problemSubmissions.length})</div>
-        {problemSubmissions.length === 0 ? (
-          <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: "20px 0" }}>No candidates have completed this yet.</div>
-        ) : (
-          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {problemSubmissions.map((s, i) => (
-              <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 14px" }}>
-                <div>
-                  <div style={{ fontSize: 13, fontWeight: 600 }}>{i === 0 ? "🥇 " : i === 1 ? "🥈 " : i === 2 ? "🥉 " : ""}{s.userName}</div>
-                  <div style={{ fontSize: 11, color: G.muted }}>{s.title}</div>
-                </div>
-                <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 18, color: scoreColor(s.score) }}>{s.score}</div>
-              </div>
-            ))}
+        {publishedSolution && (
+          <div style={{ background: "rgba(255,179,71,0.08)", border: "1px solid rgba(255,179,71,0.3)", borderRadius: 12, padding: "14px 16px", marginBottom: 20 }}>
+            <div style={{ fontSize: 11, fontWeight: 700, color: "#FFB347", letterSpacing: "0.5px", marginBottom: 8 }}>🏆 EXPERT TOP SOLUTION — {publishedSolution.expertName}{publishedSolution.expertCredential ? ` (${publishedSolution.expertCredential})` : ""}</div>
+            <div style={{ fontSize: 13, color: "#C8C4DC", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{publishedSolution.content}</div>
           </div>
+        )}
+
+        {/* Business sees an aggregate only, never named students */}
+        {user?.role === "business" && (
+          <div style={{ display: "flex", gap: 10, marginBottom: 4 }}>
+            <div style={{ flex: 1, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "14px", textAlign: "center" }}>
+              <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 20 }}>{problemSubmissions.length}</div>
+              <div style={{ fontSize: 11, color: G.muted, marginTop: 2 }}>Candidates attempted</div>
+            </div>
+            <div style={{ flex: 1, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "14px", textAlign: "center" }}>
+              <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 20, color: G.green }}>{problemSubmissions.length ? Math.round(problemSubmissions.reduce((a, s) => a + (s.score || 0), 0) / problemSubmissions.length) : "—"}</div>
+              <div style={{ fontSize: 11, color: G.muted, marginTop: 2 }}>Avg. score</div>
+            </div>
+          </div>
+        )}
+
+        {/* Admin sees named submissions + can open the full transcript */}
+        {user?.role === "admin" && (
+          <>
+            <div style={{ fontSize: 11, fontWeight: 600, color: G.muted, letterSpacing: "0.5px", marginBottom: 12 }}>SUBMISSIONS ({problemSubmissions.length})</div>
+            {problemSubmissions.length === 0 ? (
+              <div style={{ fontSize: 13, color: G.muted, textAlign: "center", padding: "20px 0" }}>No candidates have completed this yet.</div>
+            ) : (
+              <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 20 }}>
+                {problemSubmissions.map((s, i) => (
+                  <div key={i}>
+                    <div className="hc" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 14px", cursor: "pointer" }}
+                      onClick={async () => setViewingTranscript(viewingTranscript?.userId === s.userId ? null : { ...s, data: await loadTranscript(s.userId, viewingProblem.id) })}>
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>{i === 0 ? "🥇 " : i === 1 ? "🥈 " : i === 2 ? "🥉 " : ""}{s.userName}</div>
+                        <div style={{ fontSize: 11, color: G.muted }}>{s.title} · tap to view conversation</div>
+                      </div>
+                      <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 18, color: scoreColor(s.score) }}>{s.score}</div>
+                    </div>
+                    {viewingTranscript?.userId === s.userId && (
+                      <div style={{ background: "#09090F", border: `1px solid ${G.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "12px 14px", maxHeight: 260, overflowY: "auto" }}>
+                        {viewingTranscript.data?.messages?.length ? viewingTranscript.data.messages.map((m, mi) => (
+                          <div key={mi} style={{ marginBottom: 10, fontSize: 12, lineHeight: 1.6 }}>
+                            <span style={{ fontWeight: 700, color: m.role === "user" ? G.accent : G.green }}>{m.role === "user" ? s.userName.split(" ")[0] : "AI Mentor"}: </span>
+                            <span style={{ color: "#C8C4DC" }}>{m.content}</span>
+                          </div>
+                        )) : <div style={{ fontSize: 12, color: G.muted }}>Transcript not available.</div>}
+                      </div>
+                    )}
+                  </div>
+                ))}
+              </div>
+            )}
+            <div style={{ fontSize: 11, fontWeight: 600, color: G.muted, letterSpacing: "0.5px", marginBottom: 10 }}>📚 REFERENCE MATERIAL FOR STUDENTS</div>
+            <textarea value={refDraft.notes} onChange={e => setRefDraft(p => ({ ...p, notes: e.target.value }))} placeholder="Notes / prep guidance shown to students before they attempt this case..."
+              style={{ width: "100%", minHeight: 70, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 12px", color: G.text, fontSize: 13, fontFamily: "Inter", resize: "vertical", marginBottom: 8 }} />
+            <textarea value={refDraft.links} onChange={e => setRefDraft(p => ({ ...p, links: e.target.value }))} placeholder={"One link per line: Title | https://...\ne.g. Porter's Five Forces | https://example.com/article"}
+              style={{ width: "100%", minHeight: 54, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 12px", color: G.text, fontSize: 12, fontFamily: "Inter", resize: "vertical", marginBottom: 10 }} />
+            <button onClick={() => saveReferenceMaterial(viewingProblem.id)} disabled={savingRef} className="btn" style={{ width: "100%", background: G.accentDim, color: G.accent, border: `1px solid ${G.accentBorder}`, borderRadius: 10, padding: "10px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>
+              {savingRef ? "Saving..." : refMaterial ? "Update Reference Material" : "Save Reference Material"}
+            </button>
+          </>
         )}
       </div>
     </div>
@@ -961,6 +1113,7 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
             { label: "🎓 Student", email: "demo@caseos.in", password: "caseos123" },
             { label: "🏢 Business", email: "business@caseos.in", password: "biz123" },
             { label: "⚙ Admin", email: "admin@caseos.in", password: "admin123" },
+            { label: "🎯 Expert Reviewer", email: "expert@caseos.in", password: "expert123" },
           ].map(d => (
             <button key={d.email} onClick={() => { setAuthForm(p => ({ ...p, name: "", email: d.email, password: d.password })); setAuthMode("login"); handleAuth(); }} className="btn"
               style={{ width: "100%", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 8, padding: "9px 12px", marginBottom: 6, color: G.text, fontSize: 12, fontWeight: 600, cursor: "pointer", fontFamily: "Inter", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
@@ -1267,6 +1420,7 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
               { id: "students", label: `Students (${adminStudents.length})` },
               { id: "businesses", label: `Businesses (${adminBusinesses.length})` },
               { id: "problems", label: `Problems (${adminProblems.length})${pendingCount ? ` · ${pendingCount} pending` : ""}` },
+              { id: "experts", label: `Experts (${adminExperts.length})` },
             ].map(t => (
               <button key={t.id} onClick={() => setAdminTab(t.id)} className="btn" style={{ padding: "8px 14px", border: "none", borderRadius: 7, cursor: "pointer", fontSize: 12, fontWeight: 600, fontFamily: "Inter", background: adminTab === t.id ? G.accent : "transparent", color: adminTab === t.id ? "#fff" : G.muted, whiteSpace: "nowrap" }}>
                 {t.label}
@@ -1323,7 +1477,7 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
                 </div>
               ))}
             </div>
-          ) : (
+          ) : adminTab === "problems" ? (
             <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
               {adminProblems.length === 0 && <div style={{ color: G.muted, fontSize: 13, textAlign: "center", padding: 40 }}>No problems submitted yet.</div>}
               {adminProblems.map(p => {
@@ -1346,9 +1500,112 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
                 );
               })}
             </div>
+          ) : (
+            <div>
+              <div style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14, padding: 20, marginBottom: 20 }}>
+                <div style={{ fontSize: 13, fontWeight: 600, marginBottom: 14 }}>Invite an Expert Reviewer</div>
+                <div style={{ display: "flex", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+                  <input value={inviteForm.name} onChange={e => setInviteForm(p => ({ ...p, name: e.target.value }))} placeholder="Full name" style={{ flex: "1 1 160px", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 8, padding: "10px 12px", color: G.text, fontSize: 13, fontFamily: "Inter" }} />
+                  <input value={inviteForm.email} onChange={e => setInviteForm(p => ({ ...p, email: e.target.value }))} placeholder="Email" type="email" style={{ flex: "1 1 160px", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 8, padding: "10px 12px", color: G.text, fontSize: 13, fontFamily: "Inter" }} />
+                  <input value={inviteForm.credential} onChange={e => setInviteForm(p => ({ ...p, credential: e.target.value }))} placeholder="Credential (e.g. IIM Ahmedabad)" style={{ flex: "1 1 200px", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 8, padding: "10px 12px", color: G.text, fontSize: 13, fontFamily: "Inter" }} />
+                </div>
+                <button onClick={inviteExpert} disabled={inviting || !inviteForm.name || !inviteForm.email} className="btn" style={{ background: G.accent, color: "#fff", border: "none", borderRadius: 8, padding: "10px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>
+                  {inviting ? "Inviting..." : "+ Invite Expert"}
+                </button>
+                {lastInvite && (
+                  <div style={{ marginTop: 14, background: G.accentDim, border: `1px solid ${G.accentBorder}`, borderRadius: 10, padding: "12px 14px", fontSize: 12, color: G.text }}>
+                    ✓ Invited. Share these login details: <strong>{lastInvite.email}</strong> / <strong>{lastInvite.password}</strong>
+                  </div>
+                )}
+              </div>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                {adminExperts.length === 0 && <div style={{ color: G.muted, fontSize: 13, textAlign: "center", padding: 20 }}>No experts invited yet.</div>}
+                {adminExperts.map(x => (
+                  <div key={x.id} style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 12, padding: "14px 18px" }}>
+                    <div style={{ fontSize: 13, fontWeight: 600 }}>{x.name}</div>
+                    <div style={{ fontSize: 11, color: G.muted }}>{x.email}{x.credential ? ` · ${x.credential}` : ""}</div>
+                  </div>
+                ))}
+              </div>
+            </div>
           )}
         </div>
         {problemDetailModal}
+      </div>
+    );
+  }
+
+  // ── EXPERT ───────────────────────────────────────────────────────────────
+  if (screen === "expert") {
+    return (
+      <div style={{ minHeight: "100vh", background: G.bg, fontFamily: "Inter", color: G.text }}>
+        <style>{css}</style>
+        <div style={{ padding: "14px 24px", borderBottom: `1px solid ${G.border}`, display: "flex", alignItems: "center", justifyContent: "space-between", position: "sticky", top: 0, background: G.bg, zIndex: 10 }}>
+          <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+            <div style={{ width: 30, height: 30, background: `linear-gradient(135deg, ${G.accent}, #A594FF)`, borderRadius: 7, display: "flex", alignItems: "center", justifyContent: "center", fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 14, color: "#fff" }}>C</div>
+            <span style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16 }}>CaseOS</span>
+            <span style={{ fontSize: 11, color: "#FFB347", background: "rgba(255,179,71,0.1)", border: "1px solid rgba(255,179,71,0.25)", borderRadius: 20, padding: "2px 9px", marginLeft: 4 }}>🎯 Expert Reviewer</span>
+          </div>
+          <button onClick={logout} className="btn" style={{ background: "none", border: `1px solid ${G.border}`, borderRadius: 8, padding: "6px 14px", color: G.muted, fontSize: 12, cursor: "pointer", fontFamily: "Inter" }}>Sign out</button>
+        </div>
+        <div style={{ maxWidth: 860, margin: "0 auto", padding: "24px 20px 80px" }}>
+          <div style={{ fontSize: 12, color: G.muted, marginBottom: 20 }}>Showing the top 10% of completed attempts per case, ranked by AI scorecard score. Publish the finest solution — it becomes visible to the student, the business, and admin.</div>
+          {expertLoading ? (
+            <div style={{ textAlign: "center", padding: 60, color: G.muted, fontSize: 13 }}>Loading...</div>
+          ) : expertQueue.length === 0 ? (
+            <div style={{ textAlign: "center", padding: 60, color: G.muted, fontSize: 13 }}>No completed attempts yet across any case.</div>
+          ) : (
+            <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+              {expertQueue.map(q => (
+                <div key={q.caseId} style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 14, padding: "18px 20px" }}>
+                  <div className="hc" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", cursor: "pointer" }}
+                    onClick={() => { const opening = expertCaseOpen === q.caseId ? null : q.caseId; setExpertCaseOpen(opening); setSolutionDraft(q.solution?.content || ""); }}>
+                    <div>
+                      <div style={{ fontSize: 14, fontWeight: 600 }}>{q.caseTitle}</div>
+                      <div style={{ fontSize: 11, color: G.muted, marginTop: 2 }}>{q.company} · {q.totalAttempts} completed · top {q.top.length} in queue{q.hasSolution ? " · ✓ solution published" : ""}</div>
+                    </div>
+                    <div style={{ fontSize: 18, color: G.muted }}>{expertCaseOpen === q.caseId ? "▾" : "▸"}</div>
+                  </div>
+                  {expertCaseOpen === q.caseId && (
+                    <div style={{ marginTop: 16 }}>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: G.muted, letterSpacing: "0.5px", marginBottom: 10 }}>TOP {q.top.length} SUBMISSIONS</div>
+                      <div style={{ display: "flex", flexDirection: "column", gap: 8, marginBottom: 18 }}>
+                        {q.top.map((s, i) => (
+                          <div key={s.userId}>
+                            <div className="hc" style={{ display: "flex", justifyContent: "space-between", alignItems: "center", background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 14px", cursor: "pointer" }}
+                              onClick={async () => setViewingTranscript(viewingTranscript?.userId === s.userId ? null : { ...s, data: await loadTranscript(s.userId, q.caseId) })}>
+                              <div>
+                                <div style={{ fontSize: 13, fontWeight: 600 }}>{i === 0 ? "🥇 " : i === 1 ? "🥈 " : i === 2 ? "🥉 " : ""}{s.userName}{s.studentCollege ? ` · ${s.studentCollege}` : ""}</div>
+                                <div style={{ fontSize: 11, color: G.muted }}>tap to view conversation</div>
+                              </div>
+                              <div style={{ fontFamily: "Space Grotesk", fontWeight: 700, fontSize: 16, color: scoreColor(s.score) }}>{s.score}</div>
+                            </div>
+                            {viewingTranscript?.userId === s.userId && (
+                              <div style={{ background: "#09090F", border: `1px solid ${G.border}`, borderTop: "none", borderRadius: "0 0 10px 10px", padding: "12px 14px", maxHeight: 240, overflowY: "auto" }}>
+                                {viewingTranscript.data?.messages?.length ? viewingTranscript.data.messages.map((m, mi) => (
+                                  <div key={mi} style={{ marginBottom: 10, fontSize: 12, lineHeight: 1.6 }}>
+                                    <span style={{ fontWeight: 700, color: m.role === "user" ? G.accent : G.green }}>{m.role === "user" ? s.userName.split(" ")[0] : "AI Mentor"}: </span>
+                                    <span style={{ color: "#C8C4DC" }}>{m.content}</span>
+                                  </div>
+                                )) : <div style={{ fontSize: 12, color: G.muted }}>Transcript not available.</div>}
+                              </div>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                      <div style={{ fontSize: 11, fontWeight: 600, color: G.muted, letterSpacing: "0.5px", marginBottom: 10 }}>{q.hasSolution ? "MODEL SOLUTION (edit & republish)" : "WRITE THE MODEL SOLUTION"}</div>
+                      <textarea value={solutionDraft} onChange={e => setSolutionDraft(e.target.value)} placeholder="Write the finest solution here — this becomes visible to the student, the business, and admin..."
+                        style={{ width: "100%", minHeight: 140, background: G.bg, border: `1px solid ${G.border}`, borderRadius: 10, padding: "12px 14px", color: G.text, fontSize: 13, fontFamily: "Inter", resize: "vertical", marginBottom: 10 }} />
+                      <button onClick={() => publishSolution(q.caseId)} disabled={publishingSolution || !solutionDraft.trim()} className="btn" style={{ background: G.accent, color: "#fff", border: "none", borderRadius: 10, padding: "11px 18px", fontSize: 13, fontWeight: 600, cursor: "pointer", fontFamily: "Inter" }}>
+                        {publishingSolution ? "Publishing..." : q.hasSolution ? "Republish Solution" : "Publish Solution"}
+                      </button>
+                    </div>
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -1405,6 +1662,24 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
         {/* REFERENCES TAB */}
         {chatTab === "references" && (
           <div style={{ flex: 1, overflowY: "auto", padding: "20px 18px" }}>
+            {publishedSolution && (
+              <div style={{ background: "rgba(255,179,71,0.08)", border: "1px solid rgba(255,179,71,0.3)", borderRadius: 12, padding: "14px 16px", marginBottom: 24 }}>
+                <div style={{ fontSize: 11, fontWeight: 700, color: "#FFB347", letterSpacing: "0.5px", marginBottom: 8 }}>🏆 EXPERT TOP SOLUTION — {publishedSolution.expertName}{publishedSolution.expertCredential ? ` (${publishedSolution.expertCredential})` : ""}</div>
+                <div style={{ fontSize: 13, color: "#C8C4DC", lineHeight: 1.7, whiteSpace: "pre-wrap" }}>{publishedSolution.content}</div>
+                <div style={{ fontSize: 11, color: G.muted, marginTop: 8 }}>💡 Try solving it yourself first — this is here for after you've given it a real attempt.</div>
+              </div>
+            )}
+            {refMaterial && (refMaterial.notes || refMaterial.links?.length > 0) && (
+              <div style={{ marginBottom: 24 }}>
+                <div style={{ fontSize: 11, fontWeight: 600, color: G.accent, letterSpacing: "0.5px", marginBottom: 12 }}>📌 FROM THE CASEOS TEAM</div>
+                {refMaterial.notes && <div style={{ fontSize: 13, color: "#C8C4DC", lineHeight: 1.7, whiteSpace: "pre-wrap", marginBottom: 12 }}>{refMaterial.notes}</div>}
+                {refMaterial.links?.map((l, i) => (
+                  <a key={i} href={l.url} target="_blank" rel="noopener noreferrer" style={{ textDecoration: "none" }}>
+                    <div className="hc" style={{ background: G.surface, border: `1px solid ${G.border}`, borderRadius: 10, padding: "10px 14px", marginBottom: 8, fontSize: 13, color: G.accent }}>🔗 {l.title}</div>
+                  </a>
+                ))}
+              </div>
+            )}
             {refs ? (
               <>
                 {/* Concepts */}
@@ -1467,13 +1742,13 @@ YOUR ROLE: Socratic mentor. Ask probing questions. Challenge assumptions. Never 
                   💡 Study these before or after your mentor session. Come back to the chat with stronger thinking.
                 </div>
               </>
-            ) : (
+            ) : (!refMaterial?.notes && !refMaterial?.links?.length && !publishedSolution) ? (
               <div style={{ textAlign: "center", padding: "60px 20px", color: G.muted }}>
                 <div style={{ fontSize: 32, marginBottom: 12 }}>📚</div>
                 <div style={{ fontSize: 14 }}>References will be added for this case soon.</div>
                 <div style={{ fontSize: 12, marginTop: 6 }}>Try searching the key concepts on YouTube for now.</div>
               </div>
-            )}
+            ) : null}
           </div>
         )}
 
